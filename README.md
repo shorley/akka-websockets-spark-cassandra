@@ -45,15 +45,21 @@ To run in kafka mode, you will need to perform some additional steps.
    ```
 4. Create the needed table: 
    ```
-   CREATE TABLE trademsgs1minutewindow (
+   CREATE TABLE cryptocompare.trademsgs1minutewindow (
+	date timestamp,
     window_start timestamp,
     window_end timestamp,
     market text,
     direction text,
-    totalvol double,
+	fromcoin text,
+	tocurrency text,
     avgprice double,
-    totaltrade bigint,
-    PRIMARY KEY ((window_start, window_end), market, direction));
+    totalquantity double,
+    totalvol double,
+	counttxns bigint,
+	uuid timeuuid,
+    PRIMARY KEY ((date), window_end, window_start, direction, market)
+) WITH CLUSTERING ORDER BY (window_end DESC, window_start DESC, direction ASC, market ASC);
    ```
 Finally, Submit your application to the cluster by entering the command below.
 ```

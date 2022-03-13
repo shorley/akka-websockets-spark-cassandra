@@ -7,6 +7,7 @@ import akka.http.scaladsl.model._
 import akka.http.scaladsl.model.headers._
 import akka.http.scaladsl.model.ws._
 import akka.stream.{ActorMaterializer, OverflowStrategy}
+import com.datastax.driver.core.utils.UUIDs
 import org.apache.kafka.clients.producer._
 import org.apache.kafka.common.serialization.StringSerializer
 import org.apache.spark.sql._
@@ -17,6 +18,8 @@ import org.reactivestreams.Publisher
 import org.slf4j.LoggerFactory
 import spray.json._
 
+import java.sql.Timestamp
+import java.time.Instant
 import java.util.Properties
 import scala.concurrent._
 import scala.concurrent.duration._
@@ -30,6 +33,22 @@ case class WSMsgWrongApiKey(TYPE: String, MESSAGE: String, PARAMETER: String, IN
 case class WSMsgTicker(TYPE: String, MARKET: String, FROMSYMBOL: String, TOSYMBOL: String, FLAGS: Long, PRICE: Double, LASTUPDATE: Long, LASTVOLUME: Double, VOLUMEDAY: Double)
 case class WSMsgTrade(TYPE: String, M: String, FSYM: String, TSYM: String, F: String, ID: String, TS: Long, Q:Double, P: Double, TOTAL: Double, RTS: Long)
 
+case class TradeMsg(id: String, fromcoin: String, tocurrency: String, market: String, direction: String, timestamp: Timestamp, quantity: Double, vol: Double, price: Double, window: (Timestamp, Timestamp))
+case object TradeMsg{
+  def apply(w: WSMsgTrade, period:Int): TradeMsg = {
+    def windowBy(tmsg: Long, period: Int) = {
+      val periodms = period * 1000L
+      val msCur = tmsg
+      val msLB = (msCur / periodms) * periodms
+      (Timestamp.from(Instant.ofEpochMilli(msLB)), Timestamp.from(Instant.ofEpochMilli(msLB+periodms)))
+    }
+    w.F match {
+      case "1" => TradeMsg(w.ID, w.FSYM, w.TSYM, w.M, "SELL", new Timestamp(w.TS * 1000), w.Q, w.TOTAL, w.P, windowBy(w.TS * 1000, period))
+      case _ => TradeMsg(w.ID, w.FSYM, w.TSYM, w.M, "BUY", new Timestamp(w.TS * 1000), w.Q, w.TOTAL, w.P, windowBy(w.TS * 1000, period))
+    }
+  }
+}
+case class TradeMsgAvgByWindowPeriod(date: Timestamp, window_start: Timestamp, window_end: Timestamp, market: String, direction: String, fromcoin: String, tocurrency: String, totalvol: Double, avgprice: Double, totalquantity: Double, counttxns: Long)
 
 object ConsumeWSJsonProtocol extends DefaultJsonProtocol {
   implicit val wsmsgreqFormat = jsonFormat2(WSMsgSubRequest)
@@ -200,31 +219,88 @@ object ConsumeWS {
 object SparkProcessMsgs{
   import org.apache.spark.sql.functions._
 
-  def highestTxnsPerVolEvery60Secs(df: DataFrame): DataFrame = {
-    //limit to only mode SELL ->1, BUY -> 2
-    val df_repartition = df.coalesce(8)
+  def highestTxnsPerVolEvery60SecsDSWithState(df: Dataset[WSMsgTrade])(implicit spark: SparkSession) = {
+    import org.apache.spark.sql.streaming.{GroupState, GroupStateTimeout, OutputMode}
+    import spark.implicits._
 
-    df_repartition.withColumn("TS", to_timestamp(from_unixtime(col("TS"))))
-      .withColumn("Direction", when(col("F") === 1, "SELL").otherwise("BUY"))
-      .filter(col("F").isin(Seq(1,2):_*))
-      .withWatermark("TS", "5 minutes")
-      .groupBy(col("M").as("Market"), col("Direction"), window(col("TS"), "60 seconds").as("window"))
-      .agg(round(sum(col("TOTAL")), 8).as("TotalVol"), round(avg(col("P")), 8).as("AvgPrice"), count(col("ID")).as("TotalTrade"))
-      .selectExpr("window.start as window_start", "window.end as window_end", "market", "direction", "totalvol", "avgprice", "totaltrade")
-      /*.orderBy($"Window_Start", $"direction", $"TotalVol".desc)*/
+    val striptime: Timestamp=> Timestamp  = timestamp=> java.sql.Timestamp.valueOf(timestamp.toLocalDateTime.toLocalDate.atStartOfDay())
+
+    def stateToAverageEvent(key : (String, String, String, (Timestamp, Timestamp)), data: List[TradeMsg]): Iterator[TradeMsgAvgByWindowPeriod] ={
+      val totvol = data.map(_.vol).sum
+      val avgprice = data.map(_.price).sum / data.size
+      val totquant = data.map(_.quantity).sum
+      Iterator(TradeMsgAvgByWindowPeriod(striptime(key._4._2), key._4._1, key._4._2, key._1, key._3, key._2, "USD", totvol, avgprice, totquant, data.size))
+    }
+
+    def avgTradeMsgWithWatermarkFn(key: (String, String, String, (Timestamp, Timestamp)),
+                                   values: Iterator[TradeMsg], state: GroupState[List[TradeMsg]]) : Iterator[TradeMsgAvgByWindowPeriod] = {
+      if (state.hasTimedOut) {
+        state.remove()
+        Iterator()
+      } else {
+        val groups = values.to[collection.immutable.Seq]
+        val previous  =
+          if(state.exists) state.get
+          else List()
+
+        val updatedstate = groups.foldLeft(previous) {
+          (current, record) => current :+ record
+        }
+
+        state.update(updatedstate)
+        state.setTimeoutTimestamp(state.getCurrentWatermarkMs(), "5 minutes")
+        stateToAverageEvent(key, state.get)
+      }
+    }
+
+    val windowbysecs = 60;
+    val df_repartition = df.coalesce(8)
+    val filtereddf = df_repartition
+      //limit to only mode SELL ->1, BUY -> 2
+      .filter(f => Seq[String]("1","2").contains(f.F))
+      .map(TradeMsg(_, windowbysecs))
+      .withWatermark("timestamp", "5 minutes")
+
+    val groupeddf = filtereddf
+      .groupByKey(t => (t.market, t.fromcoin, t.direction, t.window))
+      .flatMapGroupsWithState(OutputMode.Update(), GroupStateTimeout.EventTimeTimeout())(avgTradeMsgWithWatermarkFn)
+
+    groupeddf
   }
+
+  /*def highestTxnsPerVolEvery60SecsDS(df: Dataset[WSMsgTrade])(implicit spark: SparkSession) = {
+    import spark.implicits._
+
+    val windowbysecs = 60;
+    val df_repartition = df.coalesce(8)
+    val filtereddf = df_repartition
+      //limit to only mode SELL ->1, BUY -> 2
+      .filter(f => Seq[String]("1","2").contains(f.F))
+      .map(TradeMsg(_, windowbysecs))
+      .withWatermark("timestamp", "5 minutes")
+    filtereddf
+      .groupByKey(t => (t.market, t.fromcoin, t.direction, t.window))
+      .agg(typed.sum(_.vol), typed.avg(_.price), typed.sum(_.quantity), typed.count(_.id))
+      .map{
+        case ((market, coin, direction, window), tot_vol, avg_price, tot_qty, count_trade) =>
+          val timestrippedoff = java.sql.Timestamp.valueOf(window._2.toLocalDateTime.toLocalDate.atStartOfDay())
+          TradeMsgAvgByWindowPeriod(timestrippedoff, window._1, window._2, market, direction, coin, "USD", tot_vol, avg_price, tot_qty, count_trade)
+      }
+  }*/
 
   def runProcessForMemory()(implicit spark: SparkSession, apikey: String, timeout: Int) = {
     import spark.implicits._
     implicit val sqlcontext = spark.sqlContext
 
     val msgtradesrc = MemoryStream[WSMsgTrade]
-    val msgstream = msgtradesrc.toDF()
-    val windowperiod = highestTxnsPerVolEvery60Secs(msgstream)
+    val msgstream = msgtradesrc.toDF().as[WSMsgTrade]
+    val windowperiod = highestTxnsPerVolEvery60SecsDSWithState(msgstream)
 
     val query = windowperiod.writeStream
       .option("checkpointLocation", "checkpoints")
       .format("console")
+      .option("truncate", "false")
+      .option("numRows", "50")
       .outputMode("update")
       .trigger(Trigger.ProcessingTime(15.seconds))
       .start()
@@ -246,14 +322,15 @@ object SparkProcessMsgs{
       .load()
       .selectExpr("CAST(value AS STRING) AS wstradejson")
       .select(from_json($"wstradejson", wstradeschema).as("wstrade")) // composite column (struct)
-      .selectExpr("wstrade.*")
+      .selectExpr("wstrade.*").as[WSMsgTrade]
 
-    val windowperiod = highestTxnsPerVolEvery60Secs(kafkamsgstream)
+    val windowperiod = highestTxnsPerVolEvery60SecsDSWithState(kafkamsgstream)
+    val makeuuids = udf(() => UUIDs.timeBased().toString)
 
     val query = windowperiod.writeStream
       .option("checkpointLocation", "checkpoint-kafka-cassandra")
-      .foreachBatch((batch: DataFrame, batchid: Long) => {
-        batch.write
+      .foreachBatch((batch, batchid) => {
+        batch.withColumn("uuid", makeuuids()).write
           .option("spark.cassandra.connection.host", cassandraurl)
           .cassandraFormat("trademsgs1minutewindow", "cryptocompare")
           .mode(SaveMode.Append)
