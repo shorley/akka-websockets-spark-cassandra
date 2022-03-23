@@ -43,11 +43,15 @@ To run in kafka mode, you will need to perform some additional steps.
 
 1. Create your kafka broker or run docker-compose up on docker-compose.yml file already provided.
 ```
-add the command(s) here
+from your terminal window, switch to the src folder
+run: docker-compose up
 ```
 2. Create the necessary kafka topic and take note of it.
 ```
-add the command(s) here
+If running kafka on docker,
+>> docker exec -it kafka /bin/bash 
+>> cd opt/bitnami/kafka/bin/
+>> ./kafka-topics.sh --create --partitions 1 --replication-factor 1 --bootstrap-server localhost:9092 --topic cryptocompare
 ```
 3. Log into CQLSH and create a new keyspace
 ```
@@ -84,7 +88,7 @@ akka-websockets-spark-cassandra_2.11-0.1.jar --mode kafka --timeout 300\
 ```
 6. Log into CQLSH to view data streamed in real time.
 ```
-add commands
+select * from cryptocompare.trademsgs1minutewindow where date = '2021-01-08 23:00:00+0000';
 ```
 ![img_1.png](img_1.png)
 
