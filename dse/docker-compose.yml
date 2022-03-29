@@ -1,0 +1,73 @@
+version: '3.7'
+services:
+  dse-opscenter:
+    image: 'datastax/dse-opscenter:6.8.15'
+    restart: always
+    container_name: dse-opscenter
+    hostname: dse-opscenter
+    ports:
+      - "8888:8888"
+      - "61620:61620"
+    volumes:
+      - dse_opscenter_conf:/opt/opscenter/conf
+    environment:
+      - DS_LICENSE=accept
+    networks:
+      - dse-network
+
+  dse-server:
+    image: 'datastax/dse-server:6.8.15'
+    restart: always
+    container_name: dse-server
+    hostname: dse-server
+    command:
+      - -s
+      - -k
+      - -g
+    depends_on:
+      - dse-opscenter
+    ports:
+      - "9042:9042"
+      - "9160:9160"
+      - "7000:7000"
+      - "7001:7001"
+      - "7199:7199"
+      - "9142:9142"
+    volumes:
+      - dse_server_data:/var/lib/cassandra
+    environment:
+      - DS_LICENSE=accept
+      - OPSCENTER_IP=dse-opscenter
+      - HEAP_NEWSIZE=128M
+      - MAX_HEAP_SIZE=2048M
+    links:
+      - dse-opscenter
+    networks:
+      - dse-network
+
+  dse-studio:
+    image: datastax/dse-studio
+    restart: always
+    depends_on:
+      - dse-server
+    container_name: dse-studio
+    ports:
+      - "9091:9091"
+    environment:
+      - DS_LICENSE=accept
+    volumes:
+      - dse_studio_data:/var/lib/datastax-studio
+    links:
+      - dse-server
+    networks:
+      - dse-network
+
+volumes:
+  dse_studio_data:
+  dse_server_data:
+  dse_opscenter_conf:
+
+networks:
+  dse-network:
+    name: dse-network
+
