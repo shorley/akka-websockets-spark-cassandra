@@ -2,22 +2,14 @@ name := "akka-websockets-spark-cassandra"
 
 version := "0.1"
 
-scalaVersion := "2.11.12"
-
-//idePackagePrefix := Some("com.akka_ws")
+scalaVersion := "2.12.10"
 
 val akkaVersion = "2.5.32"
 val akkaHttpVersion = "10.1.15"
-val sparkVersion = "2.4.0"
-val cassandraConnectorVersion = "2.4.2"
-val kafkaVersion = "2.2.1"
+val sparkVersion = "3.3.0"
+val kafkaVersion = "2.4.0"
+val log4jVersion = "2.4.1"
 
-
-/*resolvers ++= Seq(
-  "bintray-spark-packages" at "https://dl.bintray.com/spark-packages/maven",
-  "Typesafe Simple Repository" at "https://repo.typesafe.com/typesafe/simple/maven-releases",
-  "MavenRepository" at "https://mvnrepository.com"
-)*/
 
 libraryDependencies ++= Seq(
   "com.typesafe.akka" %% "akka-stream" % akkaVersion,
@@ -31,7 +23,8 @@ libraryDependencies ++= Seq(
   "org.apache.spark" %% "spark-sql" % sparkVersion % "provided",
   "org.apache.spark" %% "spark-streaming" % sparkVersion,
 
-  "com.datastax.spark" %% "spark-cassandra-connector" % cassandraConnectorVersion,
+  "org.apache.logging.log4j" % "log4j-api" % log4jVersion,
+  "org.apache.logging.log4j" % "log4j-core" % log4jVersion,
 
   "org.apache.spark" %% "spark-streaming-kafka-0-10" % sparkVersion,
   "org.apache.spark" %% "spark-sql-kafka-0-10" % sparkVersion,

@@ -7,12 +7,9 @@ import akka.http.scaladsl.model._
 import akka.http.scaladsl.model.headers._
 import akka.http.scaladsl.model.ws._
 import akka.stream.{ActorMaterializer, OverflowStrategy}
-import com.datastax.driver.core.utils.UUIDs
 import org.apache.kafka.clients.producer._
 import org.apache.kafka.common.serialization.StringSerializer
 import org.apache.spark.sql._
-import org.apache.spark.sql.cassandra._
-import org.apache.spark.sql.execution.streaming.MemoryStream
 import org.apache.spark.sql.streaming.Trigger
 import org.reactivestreams.Publisher
 import org.slf4j.LoggerFactory
@@ -70,6 +67,7 @@ object ConsumeWS {
   import system.dispatcher
 
   var kafkaProducer: Option[KafkaProducer[String, String]] = None
+  var watchlist: Option[Seq[String]] = None
 
   def processWSJsonMsg(json: String, actorref: ActorRef, streamerDFActor: ActorRef, timeout: Int) = {
     def asWsMsgStart(json: String) = json.parseJson.convertTo[WSMsgStart]
@@ -86,9 +84,9 @@ object ConsumeWS {
         Try(asWsMsgWrongapikey(json))) match {
         case Success(req: WSMsgStart) =>
           logger.info(s"${req}")
-          logger.info(s">>>> Subscribing to TradeMsgs for : $timeout secs")
+          logger.info(s">>>> Subscribing to TradeMsgs for : $timeout secs\nmarket: ${watchlist.getOrElse(Seq.empty)}")
           //Send a msg to start our subscription here
-          actorref ! WSMsgSubRequest("SubAdd", Seq("0~Coinbase~BTC~USD", "0~Binance~BTC~USDT", "0~Kraken~BTC~USD", "0~CoinDeal~BTC~USD", "0~Gemini~BTC~USD")).toJson.prettyPrint
+          actorref ! WSMsgSubRequest("SubAdd", watchlist.getOrElse(Seq.empty)).toJson.prettyPrint
           setScheduler(actorref, timeout)
         case Success(_: WSMsgInfo) =>
         case Success(_: WSMsgTicker) =>
@@ -115,9 +113,6 @@ object ConsumeWS {
   }
 
   def websocketFlow(streamerDFActor: ActorRef, timeout: Int) = {
-    /*val completionMatcher: PartialFunction[Any, CompletionStrategy] = { case Status.Success =>  CompletionStrategy.immediately }
-    val failureMatcher: PartialFunction[Any, Throwable]             = { case Status.Failure(cause)        => cause }*/
-
     import akka.stream.scaladsl._
 
     val (actorRef: ActorRef, publisher: Publisher[TextMessage.Strict]) =
@@ -131,8 +126,6 @@ object ConsumeWS {
         case message: TextMessage.Strict => processWSJsonMsg(message.text, actorRef, streamerDFActor, timeout)
         case _ => // ignore other message types
       }
-
-
 
     Flow.fromSinkAndSource(printSink, Source.fromPublisher(publisher))
   }
@@ -160,14 +153,10 @@ object ConsumeWS {
     }
   }
 
-  def streamWebSocketToMemory(msgtradesrc: MemoryStream[WSMsgTrade], apikey: String, timeout: Int) = {
-    val msgstreamerDFactor = system.actorOf(Props(new WSTradeMsgMemorySender(msgtradesrc)), name = "MemoryStreamerDFActor")
-    startWebSocket(msgstreamerDFactor, apikey, timeout)
-  }
-
-  def streamWebSocketToKafka(kafkaBootstrapServer:String, kafkaTopic: String, apikey: String, timeout: Int) = {
+  def streamWebSocketToKafka(kafkaBootstrapServer:String, kafkaTopic: String, apikey: String, watchlist:Seq[String], timeout: Int) = {
     implicit val producer = getKafkaProducer(kafkaBootstrapServer)
-    kafkaProducer = Some(producer)
+    this.kafkaProducer = Some(producer)
+    this.watchlist = Some(watchlist)
     val msgstreamerDFactor = system.actorOf(Props(new WSTradeMsgKafkaSender(kafkaTopic)), name = "KafkaStreamerDFActor")
     startWebSocket(msgstreamerDFactor, apikey, timeout)
   }
@@ -187,18 +176,12 @@ object ConsumeWS {
       case _ =>
         actorRef ! Status.Success
         system.terminate()
-        println("terminated session")
+        log.info("terminated session")
+        println()
         kafkaProducer match {
           case Some(kp) => kp.close()
           case _ =>
         }
-
-    }
-  }
-
-  class WSTradeMsgMemorySender (msgtradesrc: MemoryStream[WSMsgTrade]) extends Actor{
-    override def receive = {
-      case w:WSMsgTrade => msgtradesrc.addData(w)
     }
   }
 
@@ -206,10 +189,8 @@ object ConsumeWS {
     override def receive = {
       case w:WSMsgTrade =>
         val record = new ProducerRecord[String, String](kafkaTopic, s"WSTradeMsg-${w.F}-${w.M}", s"${w.toJson}")
-        kafkaproducer.send(record, new Callback {
-            def onCompletion(metadata: RecordMetadata, exception: Exception) =
-              if(exception != null) logger.error(s"Kafka Producer record $metadata failed sending... ${exception}")
-          }
+        kafkaproducer.send(record, (metadata: RecordMetadata, exception: Exception) =>
+            if (exception != null) logger.error(s"Kafka Producer record $metadata failed sending... ${exception}")
           )
         kafkaproducer.flush()
     }
@@ -268,56 +249,17 @@ object SparkProcessMsgs{
     groupeddf
   }
 
-  /*def highestTxnsPerVolEvery60SecsDS(df: Dataset[WSMsgTrade])(implicit spark: SparkSession) = {
-    import spark.implicits._
 
-    val windowbysecs = 60;
-    val df_repartition = df.coalesce(8)
-    val filtereddf = df_repartition
-      //limit to only mode SELL ->1, BUY -> 2
-      .filter(f => Seq[String]("1","2").contains(f.F))
-      .map(TradeMsg(_, windowbysecs))
-      .withWatermark("timestamp", "5 minutes")
-    filtereddf
-      .groupByKey(t => (t.market, t.fromcoin, t.direction, t.window))
-      .agg(typed.sum(_.vol), typed.avg(_.price), typed.sum(_.quantity), typed.count(_.id))
-      .map{
-        case ((market, coin, direction, window), tot_vol, avg_price, tot_qty, count_trade) =>
-          val timestrippedoff = java.sql.Timestamp.valueOf(window._2.toLocalDateTime.toLocalDate.atStartOfDay())
-          TradeMsgAvgByWindowPeriod(timestrippedoff, window._1, window._2, market, direction, coin, "USD", tot_vol, avg_price, tot_qty, count_trade)
-      }
-  }*/
-
-  def runProcessForMemory()(implicit spark: SparkSession, apikey: String, timeout: Int) = {
-    import spark.implicits._
-    implicit val sqlcontext = spark.sqlContext
-
-    val msgtradesrc = MemoryStream[WSMsgTrade]
-    val msgstream = msgtradesrc.toDF().as[WSMsgTrade]
-    val windowperiod = highestTxnsPerVolEvery60SecsDSWithState(msgstream)
-
-    val query = windowperiod.writeStream
-      .option("checkpointLocation", "checkpoints")
-      .format("console")
-      .option("truncate", "false")
-      .option("numRows", "50")
-      .outputMode("update")
-      .trigger(Trigger.ProcessingTime(15.seconds))
-      .start()
-
-    ConsumeWS.streamWebSocketToMemory(msgtradesrc, apikey, timeout)
-    query.awaitTermination(timeoutMs=1000*60)
-  }
 
   def wstradeschema() = Encoders.product[WSMsgTrade].schema
 
-  def runProcessForKafka(kafkabootstrap: String, kafkatopic:String, cassandraurl: String)(implicit spark: SparkSession, apikey: String, timeout: Int)= {
+  def runProcess(apikey: String, kafkatopicin: String, kafkatopicout:String, watchlist:Seq[String])(implicit timeout: Int, spark: SparkSession)= {
     import spark.implicits._
 
     val kafkamsgstream= spark.readStream
       .format("kafka")
-      .option("kafka.bootstrap.servers", kafkabootstrap)
-      .option("subscribe", kafkatopic)
+      .option("kafka.bootstrap.servers", "pinot-kafka:9093")
+      .option("subscribe", kafkatopicin)
       .option("startingOffsets", "latest")
       .load()
       .selectExpr("CAST(value AS STRING) AS wstradejson")
@@ -325,110 +267,93 @@ object SparkProcessMsgs{
       .selectExpr("wstrade.*").as[WSMsgTrade]
 
     val windowperiod = highestTxnsPerVolEvery60SecsDSWithState(kafkamsgstream)
-    val makeuuids = udf(() => UUIDs.timeBased().toString)
 
-    val query = windowperiod.writeStream
-      .option("checkpointLocation", "checkpoint-kafka-cassandra")
-      .foreachBatch((batch, batchid) => {
-        batch.withColumn("uuid", makeuuids()).write
-          .option("spark.cassandra.connection.host", cassandraurl)
-          .cassandraFormat("trademsgs1minutewindow", "cryptocompare")
-          .mode(SaveMode.Append)
-          .save()
-      })
+    //convert to jsonstructure and push to kafka downstream...   s"WSTradeMsg-${w.F}-${w.M}"
+    val txnjsonKafkaDF = windowperiod.select(concat($"direction", lit("-"), $"market").as("key"),
+      to_json(struct(expr("*"))).cast("String").as("value"))
+
+    //write to kafka stream
+    val query = txnjsonKafkaDF.writeStream
+      .format("kafka")
+      .option("kafka.bootstrap.servers", "pinot-kafka:9093")
+      .option("topic", kafkatopicout)
+      .option("checkpointLocation", "checkpoint-kafka")
       .outputMode("update")
       .trigger(Trigger.ProcessingTime(15.seconds))
       .start()
 
-    ConsumeWS.streamWebSocketToKafka(kafkabootstrap, kafkatopic, apikey, timeout)
+    ConsumeWS.streamWebSocketToKafka("pinot-kafka:9093", kafkatopicin, apikey, watchlist, timeout)
 
     query.awaitTermination(timeoutMs=1000*60)
 
   }
 
-  val usage = """Usage: [--mode memory|kafka] [apikey]
-                |Additional args for [--mode kafka]: [--kafkabroker localhost:9092] [--cassandraurl localhost:9042]
-                |Optional: [--timeout 150] 'in seconds'
+  val usage = """Usage: Please ensure you define variables:
+                |KAFKA_STREAMIN_TOPIC, KAFKA_STREAMOUT_TOPIC
+                |CRYPTOCOMPARE_API_KEY,
+                |STREAM_TIMEOUT (in secs)
+                |CRYPTOCOMPARE_WATCH_LIST (eg: 0~Coinbase~BTC~USD 0~Binance~BTC~USDT)
+                |in .env file
                 |""".stripMargin
 
-  def extractParams(args: Array[String]) = {
-    def nextOption(argList:List[String], map:Map[String, String]) : Map[String, String] = {
-      val patternmode         = "--(mode)".r
-      val patternkafka        = "--(kafkabroker)".r
-      val patternkafkatopic   = "--(kafkatopic)".r
-      val patterncassandra    = "--(cassandraurl)".r
-      val patterntimeout    = "--(timeout)".r
-      val patterntimeoutv    = "(\\d{1,3})".r
-      argList match {
-        case Nil => map
-        case patternmode(opt)         :: value  :: tail => nextOption( tail, map ++ Map(opt->value) )
-        case patternkafka(opt)        :: value  :: tail => nextOption( tail, map ++ Map(opt->value) )
-        case patternkafkatopic(opt)   :: value  :: tail => nextOption( tail, map ++ Map(opt->value) )
-        case patterncassandra(opt)    :: value  :: tail => nextOption( tail, map ++ Map(opt->value) )
-        case patterntimeout(opt)      :: value  :: tail if patterntimeoutv.pattern.matcher(value).matches => nextOption( tail, map ++ Map(opt->value) )
-        case string                   :: Nil            => map ++ Map("apikey"->string)
-        case option                   :: _              =>
-          println("Unknown option:"+option)
-          println(usage)
-          sys.exit(1)
-      }
+  def readEnvVariables = {
+    val kafkatopicin = sys.env.get("KAFKA_STREAMIN_TOPIC")
+    val kafkatopicout = sys.env.get("KAFKA_STREAMOUT_TOPIC")
+    val api_key = sys.env.get("CRYPTOCOMPARE_API_KEY")
+
+    if(api_key.isEmpty) {
+      println("missing variable in .env: CRYPTOCOMPARE_API_KEY")
+      println(usage)
+      sys.exit(1)
     }
-    nextOption(args.toList,Map[String, String]())
+    if(kafkatopicin.isEmpty) {
+      println("missing variable in .env: KAFKA_STREAMIN_TOPIC")
+      println(usage)
+      sys.exit(1)
+    }
+    if(kafkatopicout.isEmpty) {
+      println("missing variable in .env: KAFKA_STREAMOUT_TOPIC")
+      println(usage)
+      sys.exit(1)
+    }
+    val watchlist = {
+      val cryptowatchlist = sys.env.get("CRYPTOCOMPARE_WATCH_LIST")
+      if(cryptowatchlist.isEmpty) {
+        println("missing variable in .env: CRYPTOCOMPARE_WATCH_LIST")
+        println(usage)
+        sys.exit(1)
+      }
+      cryptowatchlist.map(_.split("\\s+").map(_.trim).toSeq).get
+    }
+    val timeout = {
+      val timeoutstr = sys.env.getOrElse("STREAM_TIMEOUT", "150")
+      timeoutstr.toInt
+    }
+
+    Map("apikey" -> api_key,
+      "kafkatopicin" -> kafkatopicin,
+      "kafkatopicout" -> kafkatopicout,
+      "timeout" -> timeout,
+      "watchlist" -> watchlist)
   }
 
   def main(args: Array[String]): Unit = {
-    val extractedparammap = extractParams(args)
-    if(!extractedparammap.contains("mode")) {
-      println("missing parameter: --mode")
-      println(usage)
-      sys.exit(1)
-    }else {
-      val mode = extractedparammap("mode")
-      if(mode != "memory"){
-        if(!extractedparammap.contains("kafkabroker")) {
-          println("missing parameter: --kafkabroker")
-          println(usage)
-          sys.exit(1)
-        } else if(!extractedparammap.contains("kafkatopic")) {
-          println("missing parameter: --kafkatopic")
-          println(usage)
-          sys.exit(1)
-        } else if(!extractedparammap.contains("cassandraurl")) {
-          println("missing parameter: --cassandraurl")
-          println(usage)
-          sys.exit(1)
-        }
-      }
-    }
+    val extractedparammap = readEnvVariables
 
-    if(!extractedparammap.contains("apikey")) {
-      println("missing parameter: [apikey]")
-      println(usage)
-      sys.exit(1)
-    }
-
-    implicit val apikey:String = extractedparammap("apikey")
-    val timeoutstr = extractedparammap.getOrElse("timeout", "150")
-    implicit val timeout:Int = timeoutstr.toInt
+    val apikey:String = extractedparammap("apikey").asInstanceOf[String]
+    val kafkatopicin = extractedparammap("kafkatopicin").asInstanceOf[String]
+    val kafkatopicout = extractedparammap("kafkatopicout").asInstanceOf[String]
+    val watchlist = extractedparammap("watchlist").asInstanceOf[Seq[String]]
+    implicit val timeout = extractedparammap("timeout").asInstanceOf[Int]
 
     implicit val spark: SparkSession = SparkSession.builder
-      .appName("Websocket-to-Spark-Streaming")
+      .appName("CryptoCompare to Stream")
       /*.master("local[*]")*/
       .getOrCreate()
 
-
     spark.conf.set("spark.sql.shuffle.partitions",8)
-    spark.sparkContext.setLogLevel("ERROR")
 
-    println(s"running in: ${extractedparammap("mode")} mode")
-
-    if(extractedparammap("mode")== "memory")
-      runProcessForMemory()
-    else {
-      runProcessForKafka(extractedparammap("kafkabroker"), extractedparammap("kafkatopic"), extractedparammap("cassandraurl"))
-    }
-
-
+    runProcess(apikey, kafkatopicin, kafkatopicout, watchlist);
   }
 }
 

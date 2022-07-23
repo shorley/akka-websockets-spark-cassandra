@@ -51,7 +51,7 @@ project/plugins/project/
 .bsp
 
 # Enviroment specific
-.env
+#.env
 
 # Mac specific
 .DS_Store
