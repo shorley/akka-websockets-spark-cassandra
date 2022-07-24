@@ -84,7 +84,7 @@ object ConsumeWS {
         Try(asWsMsgWrongapikey(json))) match {
         case Success(req: WSMsgStart) =>
           logger.info(s"${req}")
-          logger.info(s">>>> Subscribing to TradeMsgs for : $timeout secs\nmarket: ${watchlist.getOrElse(Seq.empty)}")
+          logger.info(s">>>> Subscribing to TradeMsgs for : $timeout secs\n: ${watchlist.getOrElse(Seq.empty).mkString(" ")}")
           //Send a msg to start our subscription here
           actorref ! WSMsgSubRequest("SubAdd", watchlist.getOrElse(Seq.empty)).toJson.prettyPrint
           setScheduler(actorref, timeout)
@@ -258,7 +258,7 @@ object SparkProcessMsgs{
 
     val kafkamsgstream= spark.readStream
       .format("kafka")
-      .option("kafka.bootstrap.servers", "pinot-kafka:9093")
+      .option("kafka.bootstrap.servers", "localhost:9092")
       .option("subscribe", kafkatopicin)
       .option("startingOffsets", "latest")
       .load()
@@ -275,14 +275,14 @@ object SparkProcessMsgs{
     //write to kafka stream
     val query = txnjsonKafkaDF.writeStream
       .format("kafka")
-      .option("kafka.bootstrap.servers", "pinot-kafka:9093")
+      .option("kafka.bootstrap.servers", "localhost:9092")
       .option("topic", kafkatopicout)
       .option("checkpointLocation", "checkpoint-kafka")
       .outputMode("update")
       .trigger(Trigger.ProcessingTime(15.seconds))
       .start()
 
-    ConsumeWS.streamWebSocketToKafka("pinot-kafka:9093", kafkatopicin, apikey, watchlist, timeout)
+    ConsumeWS.streamWebSocketToKafka("localhost:9092", kafkatopicin, apikey, watchlist, timeout)
 
     query.awaitTermination(timeoutMs=1000*60)
 
@@ -330,9 +330,9 @@ object SparkProcessMsgs{
       timeoutstr.toInt
     }
 
-    Map("apikey" -> api_key,
-      "kafkatopicin" -> kafkatopicin,
-      "kafkatopicout" -> kafkatopicout,
+    Map("apikey" -> api_key.get,
+      "kafkatopicin" -> kafkatopicin.get,
+      "kafkatopicout" -> kafkatopicout.get,
       "timeout" -> timeout,
       "watchlist" -> watchlist)
   }
@@ -348,7 +348,6 @@ object SparkProcessMsgs{
 
     implicit val spark: SparkSession = SparkSession.builder
       .appName("CryptoCompare to Stream")
-      /*.master("local[*]")*/
       .getOrCreate()
 
     spark.conf.set("spark.sql.shuffle.partitions",8)
