@@ -1,7 +1,8 @@
 version: '3.7'
 services:
   spark-master:
-    image: bitnami/spark:3.3.0
+    image: bitnamispark/withcryptocompare:1.0
+#    build: .
     restart: always
     hostname: spark-master
     container_name: spark-master
@@ -11,16 +12,21 @@ services:
     volumes:
       - ../apps:/opt/spark-apps
       - ../data:/opt/spark-data
-      - ../src/main/resources/log4j.properties:/opt/bitnami/spark/conf/log4j.properties
+      - ./spark-defaults.conf:/bitnami/spark/conf/spark-defaults.conf
+      - ./log4j.properties:/bitnami/spark/conf/log4j.properties
+#      - ./ivy2/:/opt/bitnami/spark/.ivy2/
     environment:
       - SPARK_MODE=master
-      - CRYPTOCOMPARE_API_KEY
-      - STREAM_TIMEOUT
-      - CRYPTOCOMPARE_WATCH_LIST
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    env_file:
+      - ./.env
     networks:
       - pinot-network
   spark-worker-1:
-    image: bitnami/spark:3.3.0
+    image: bitnamispark/withcryptocompare:1.0
     depends_on:
       - spark-master
     container_name: spark-worker-1
@@ -31,13 +37,13 @@ services:
       - SPARK_MASTER=spark://spark-master:7077
       - SPARK_WORKER_CORES=1
       - SPARK_WORKER_MEMORY=2G
-      - CRYPTOCOMPARE_API_KEY
-      - STREAM_TIMEOUT
-      - CRYPTOCOMPARE_WATCH_LIST
+    env_file:
+      - ./.env
     volumes:
       - ../apps:/opt/spark-apps
       - ../data:/opt/spark-data
-      - ../src/main/resources/log4j.properties:/opt/bitnami/spark/conf/log4j.properties
+      - ./spark-defaults.conf:/bitnami/spark/conf/spark-defaults.conf
+      - ./log4j.properties:/bitnami/spark/conf/log4j.properties
     networks:
       - pinot-network
 

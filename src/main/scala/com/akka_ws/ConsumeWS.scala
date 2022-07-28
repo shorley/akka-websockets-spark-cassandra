@@ -253,17 +253,17 @@ object SparkProcessMsgs{
 
   def wstradeschema() = Encoders.product[WSMsgTrade].schema
 
-  def runProcess(apikey: String, kafkatopicin: String, kafkatopicout:String, watchlist:Seq[String])(implicit timeout: Int, spark: SparkSession)= {
+  def runProcess(apikey: String, kafkabootstrapserver: String, kafkatopicin: String, kafkatopicout:String, watchlist:Seq[String])(implicit timeout: Int, spark: SparkSession)= {
     import spark.implicits._
 
     val kafkamsgstream= spark.readStream
       .format("kafka")
-      .option("kafka.bootstrap.servers", "localhost:9092")
+      .option("kafka.bootstrap.servers", kafkabootstrapserver)
       .option("subscribe", kafkatopicin)
       .option("startingOffsets", "latest")
       .load()
       .selectExpr("CAST(value AS STRING) AS wstradejson")
-      .select(from_json($"wstradejson", wstradeschema).as("wstrade")) // composite column (struct)
+      .select(from_json($"wstradejson", wstradeschema).as("wstrade"))
       .selectExpr("wstrade.*").as[WSMsgTrade]
 
     val windowperiod = highestTxnsPerVolEvery60SecsDSWithState(kafkamsgstream)
@@ -272,17 +272,18 @@ object SparkProcessMsgs{
     val txnjsonKafkaDF = windowperiod.select(concat($"direction", lit("-"), $"market").as("key"),
       to_json(struct(expr("*"))).cast("String").as("value"))
 
+
     //write to kafka stream
     val query = txnjsonKafkaDF.writeStream
       .format("kafka")
-      .option("kafka.bootstrap.servers", "localhost:9092")
+      .option("kafka.bootstrap.servers", kafkabootstrapserver)
       .option("topic", kafkatopicout)
       .option("checkpointLocation", "checkpoint-kafka")
       .outputMode("update")
       .trigger(Trigger.ProcessingTime(15.seconds))
       .start()
 
-    ConsumeWS.streamWebSocketToKafka("localhost:9092", kafkatopicin, apikey, watchlist, timeout)
+    ConsumeWS.streamWebSocketToKafka(kafkabootstrapserver, kafkatopicin, apikey, watchlist, timeout)
 
     query.awaitTermination(timeoutMs=1000*60)
 
@@ -297,12 +298,18 @@ object SparkProcessMsgs{
                 |""".stripMargin
 
   def readEnvVariables = {
+    val kafkabootstrapserver = sys.env.get("KAFKA_BOOTSTRAP_SERVER")
     val kafkatopicin = sys.env.get("KAFKA_STREAMIN_TOPIC")
     val kafkatopicout = sys.env.get("KAFKA_STREAMOUT_TOPIC")
     val api_key = sys.env.get("CRYPTOCOMPARE_API_KEY")
 
     if(api_key.isEmpty) {
       println("missing variable in .env: CRYPTOCOMPARE_API_KEY")
+      println(usage)
+      sys.exit(1)
+    }
+    if (kafkabootstrapserver.isEmpty) {
+      println("missing variable in .env: KAFKA_BOOTSTRAP_SERVER")
       println(usage)
       sys.exit(1)
     }
@@ -331,6 +338,7 @@ object SparkProcessMsgs{
     }
 
     Map("apikey" -> api_key.get,
+      "kafkabootstrapserver" -> kafkabootstrapserver.get,
       "kafkatopicin" -> kafkatopicin.get,
       "kafkatopicout" -> kafkatopicout.get,
       "timeout" -> timeout,
@@ -341,6 +349,7 @@ object SparkProcessMsgs{
     val extractedparammap = readEnvVariables
 
     val apikey:String = extractedparammap("apikey").asInstanceOf[String]
+    val kafkabootstrapserver = extractedparammap("kafkabootstrapserver").asInstanceOf[String]
     val kafkatopicin = extractedparammap("kafkatopicin").asInstanceOf[String]
     val kafkatopicout = extractedparammap("kafkatopicout").asInstanceOf[String]
     val watchlist = extractedparammap("watchlist").asInstanceOf[Seq[String]]
@@ -352,7 +361,7 @@ object SparkProcessMsgs{
 
     spark.conf.set("spark.sql.shuffle.partitions",8)
 
-    runProcess(apikey, kafkatopicin, kafkatopicout, watchlist);
+    runProcess(apikey, kafkabootstrapserver, kafkatopicin, kafkatopicout, watchlist);
   }
 }
 

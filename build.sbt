@@ -2,7 +2,6 @@ name := "akka-websockets-spark-cassandra"
 version := "0.1"
 scalaVersion := "2.12.10"
 
-enablePlugins(PackPlugin)
 
 val akkaVersion = "2.5.32"
 val akkaHttpVersion = "10.1.15"
