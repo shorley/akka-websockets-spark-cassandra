@@ -1,0 +1,13 @@
+version: '3.7'
+services:
+  pinot-streaming-table-creation:
+    image: apachepinot/pinot:0.9.3
+    container_name: "pinot-streaming-table-creation"
+    command: " AddTable -schemaFile /opt/data/trademsgs-schema.json -tableConfigFile /opt/data/trademsgs-realtime-table.json -controllerHost pinot-controller -controllerPort 9000 -exec"
+    volumes:
+      - ../data:/opt/data
+    networks:
+      - pinot-network
+networks:
+  pinot-network:
+    name: pinot-network

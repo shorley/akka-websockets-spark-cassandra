@@ -270,7 +270,11 @@ object SparkProcessMsgs{
 
     //convert to jsonstructure and push to kafka downstream...   s"WSTradeMsg-${w.F}-${w.M}"
     val txnjsonKafkaDF = windowperiod.select(concat($"direction", lit("-"), $"market").as("key"),
-      to_json(struct(expr("*"))).cast("String").as("value"))
+      to_json(struct(date_format($"date", "yyyy-MM-dd HH:mm:ss").as("date"),
+        date_format($"window_start", "yyyy-MM-dd HH:mm:ss").as("window_start"),
+        date_format($"window_end", "yyyy-MM-dd HH:mm:ss").as("window_end"),
+        $"market", $"direction", $"fromcoin", $"tocurrency", $"totalvol", $"avgprice", $"totalquantity", $"counttxns"))
+        .cast("String").as("value"))
 
 
     //write to kafka stream

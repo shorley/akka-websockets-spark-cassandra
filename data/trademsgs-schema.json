@@ -1,0 +1,64 @@
+{
+  "schemaName": "tradeMsgAvgPriceByPeriod",
+  "dimensionFieldSpecs": [
+    {
+      "name": "market",
+      "dataType": "STRING",
+      "defaultNullValue": ""
+    },
+    {
+      "name": "direction",
+      "dataType": "STRING",
+      "defaultNullValue": ""
+    },
+    {
+      "name": "fromcoin",
+      "dataType": "STRING",
+      "defaultNullValue": ""
+    },
+    {
+      "name": "tocurrency",
+      "dataType": "STRING",
+      "defaultNullValue": ""
+    }
+  ],
+  "metricFieldSpecs": [
+    {
+      "name": "totalvol",
+      "dataType": "DOUBLE"
+    },
+    {
+      "name": "avgprice",
+      "dataType": "DOUBLE"
+    },
+    {
+      "name": "totalquantity",
+      "dataType": "DOUBLE"
+    },
+    {
+      "name": "counttxns",
+      "dataType": "LONG"
+    }
+  ],
+  "dateTimeFieldSpecs": [
+    {
+      "name": "date",
+      "dataType": "TIMESTAMP",
+      "format": "1:SECONDS:SIMPLE_DATE_FORMAT:yyyy-MM-dd HH:mm:ss",
+      "granularity": "1:SECONDS"
+    },
+    {
+        "name": "window_start",
+        "dataType": "TIMESTAMP",
+        "format": "1:SECONDS:SIMPLE_DATE_FORMAT:yyyy-MM-dd HH:mm:ss",
+        "granularity": "1:SECONDS"
+    },
+    {
+        "name": "window_end",
+        "dataType": "TIMESTAMP",
+        "format": "1:SECONDS:SIMPLE_DATE_FORMAT:yyyy-MM-dd HH:mm:ss",
+        "granularity": "1:SECONDS"
+    }
+
+  ]
+}
