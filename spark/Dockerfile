@@ -15,8 +15,10 @@ COPY ./build.sbt .
 RUN export PATH="${SBT_HOME}/bin:$PATH" &&  \
     mkdir -p "${SBT_HOME}" &&  \
     curl -sSL "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt-${SBT_VERSION}.tgz" | tar xz -C ${SBT_HOME} --strip-components=1 &&  \
-    ln -s "${SBT_HOME}/bin/"* "/usr/bin/" && \
-    sbt update
+    ln -s "${SBT_HOME}/bin/"* "/usr/bin/"
+
+RUN export SBT_OPTS="-Xms512m -Xmx2G -XX:MaxPermSize=2G -Xss2M -XX:MaxMetaspaceSize=1024m " && \
+    sbt -v update
 
 RUN mkdir -p "${SPARK_HOME}/.ivy2" && \
     mv /root/.ivy2/cache ${SPARK_HOME}/.ivy2/ && \

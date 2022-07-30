@@ -27,7 +27,7 @@ https://min-api.cryptocompare.com/
 3. Follow the instructions to setup your API_KEY. This API_KEY is what will grant the access to stream live messages from the exposed cryptocompare API websocket to our Spark application.
 4. Switch to your IDE and open up the terminal in the IDE. Ensure the current/ working directory is at the root of the project and running the following bash command.
 ```bash
-start.sh
+./start.sh
 ```
 4. Wait a while for the docker images to be pulled and for the project image to be built. 
 You can confirm if spark is started and running by hitting the endpoint: http://localhost:18080
